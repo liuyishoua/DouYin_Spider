@@ -526,20 +526,28 @@ class DouyinAPI:
         offset = "0"
         count = "25"
         user_list = []
+        search_id = ""
+        seen = {offset}
         while True:
-            res_json = DouyinAPI.search_user(auth, query, offset, count)
+            res_json = DouyinAPI.search_user(auth, query, offset, count, search_id=search_id)
             users = res_json["user_list"]
             user_list.extend(users)
             if res_json["has_more"] != 1 or len(user_list) >= num:
                 break
-            offset = str(int(offset) + int(count))
+            if not users:
+                raise ValueError('用户分页返回空列表，但 has_more=1')
+            offset = str(res_json.get('cursor', int(offset) + int(count)))
+            if offset in seen:
+                raise ValueError('用户分页 cursor 重复，已停止查询')
+            seen.add(offset)
+            search_id = (res_json.get('log_pb') or {}).get('impr_id', '')
         if len(user_list) > num:
             user_list = user_list[:num]
         return user_list
 
 
     @staticmethod
-    def search_user(auth, query: str, offset: str = '0', num: str = '25', douyin_user_fans="", douyin_user_type="", **kwargs):
+    def search_user(auth, query: str, offset: str = '0', num: str = '25', douyin_user_fans="", douyin_user_type="", search_id: str = '', **kwargs):
         """
         搜索用户.
         :param auth: DouyinAuth object.
@@ -548,6 +556,7 @@ class DouyinAPI:
         :param num:  搜索结果数量.
         :param douyin_user_fans: 粉丝数量 空字符串 (0_1k 1000以下) (1k_1w 1000-10000) (1w_10w 10000-100000) (10w_100w 10w-100w粉丝) (100w_ 100w以上)
         :param douyin_user_type: 用户类型 空字符串 不限 common_user 普通用户 enterprise_user 企业用户 personal_user 个人认证用户
+        :param search_id: 上一页响应的 log_pb.impr_id，首页留空.
         :return: JSON数据.
         """
         # 结尾斜杠不能少，浏览器实测就是 /search/
@@ -564,6 +573,8 @@ class DouyinAPI:
         params.add_param("aid", '6383')
         params.add_param("channel", 'channel_pc_web')
         params.add_param("search_channel", 'aweme_user_web')
+        if search_id:
+            params.add_param("search_id", search_id)
         if has_filter:
             params.add_param("search_filter_value",
                              r'{"douyin_user_fans":["%s"],"douyin_user_type":["%s"]}'
@@ -2039,13 +2050,32 @@ class DouyinAPI:
         resp = requests.post(url, params=params, headers=headers.get(), verify=False, cookies=auth.cookie,
                              data=requestProto.SerializeToString())
         responseProto = ResponseProto.Response()
-        responseProto.ParseFromString(resp.content)
+        try:
+            responseProto.ParseFromString(resp.content)
+        except Exception as exc:
+            if kwargs.get('return_details'):
+                from utils.send_diagnostics import SendUncertain, exception_diagnostic
+                raise SendUncertain({**exception_diagnostic(exc),
+                                     'http_status': getattr(resp, 'status_code', None)}) from None
+            raise
         resp_json = protobuf_to_dict(responseProto)
         success = resp_json.get('message') == 'OK'
         if success:
             logger.info(f'私信发送成功 conversation_id={conversation_id}')
         else:
             logger.error(f'私信发送失败 {resp_json}')
+        if kwargs.get('return_details'):
+            from utils.send_diagnostics import response_diagnostic
+            # Web callers must retain evidence that this schema cannot decode.
+            known = ResponseProto.Response()
+            known.CopyFrom(responseProto)
+            known.DiscardUnknownFields()
+            return {
+                'response': resp_json,
+                'has_unknown_fields': known.SerializeToString() != responseProto.SerializeToString(),
+                'diagnostic': {**response_diagnostic(responseProto),
+                               'http_status': getattr(resp, 'status_code', None)},
+            }
         return success
 
     @staticmethod
