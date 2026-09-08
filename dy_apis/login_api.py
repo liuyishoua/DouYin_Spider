@@ -2657,7 +2657,7 @@ class DYLoginApi:
             auth._qr_started = True
         return result
 
-    def check_qrcode(self, auth, token: str) -> dict:
+    def check_qrcode(self, auth, token: str, verification_params=None) -> dict:
         """轮询二维码状态。status: new / scanned / confirmed / expired。
 
         实录里这个是 **POST**，token 在表单 body 里，不在 query。
@@ -2670,13 +2670,21 @@ class DYLoginApi:
             "next": HOME_URL,
             "need_short_url": "true",
         }
+        extra = {"is_from_iesaccountsaas": "1"}
+        if verification_params is not None:
+            # Official SDK retries the original body with decision.biz_params.
+            # Do not let verification replace the QR token or redirect target.
+            if not isinstance(verification_params, dict) or set(verification_params) & data.keys():
+                raise ValueError("invalid verification parameters")
+            data.update(verification_params)
+            extra["isResend"] = "true"
         # data 要先于 params 构造：sign 把 query 和 body 一起签
         # device_fp=True：这个接口带 p_ca / p_ca_real / fp / verifyFp（3.4.4 真值）
         # Chrome 151's actual jingxuan QR request carries the full 30-field
         # query.  In particular, both msToken and a_bogus are present after
         # sign/qs; omitting either changes the browser risk input and makes
         # the request shape diverge even when the body is otherwise correct.
-        params = self._sdk_params(auth, {"is_from_iesaccountsaas": "1"},
+        params = self._sdk_params(auth, extra,
                                   data=data, device_fp=True,
                                   with_ms_token=True)
         params.with_a_bogus(data, host="login.douyin.com")
@@ -2717,6 +2725,11 @@ class DYLoginApi:
                 f'logid={resp.headers.get("X-Tt-Logid", "")}'
             )
         res = resp.json()
+        self._qr_verification_headers = {
+            name: bool(resp.headers.get(name)) for name in
+            ("x-vc-bdturing-parameters",)
+        }
+
         if (_passport_profile("DY_PASSPORT_COOKIE_PROFILE")
                 in ("chrome_current", "chrome_current_early")
                 and (res.get("data") or {}).get("status") == "expired"):
@@ -2802,7 +2815,7 @@ class DYLoginApi:
         # 本轮是否成功读到了二维码状态。限频时为 False，此时不允许换码。
         fresh_read = False
 
-        while time.time() < deadline:
+        while time.time() < deadline + getattr(self, "verification_wait_seconds", 0):
             # Run the one-shot bootstrap common report at the same boundary as
             # Chrome: after the first successful check has had one poll
             # interval to settle, and before the next check is sent.  Do not
