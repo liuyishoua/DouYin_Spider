@@ -49,6 +49,14 @@ def _resolve_impersonate():
         supported = {item.value for item in BrowserType}
     except Exception:
         supported = set()
+    if requested == "firefox":
+        versions = [int(value[7:]) for value in supported
+                    if re.fullmatch(r"firefox\d+", value)]
+        if not versions:
+            raise ValueError("curl_cffi has no supported Firefox profile")
+        return f"firefox{max(versions)}"
+    if requested.startswith("firefox") and requested not in supported:
+        raise ValueError("Unsupported Firefox transport profile")
     if not supported or requested in supported:
         return requested
     match = re.fullmatch(r"chrome(\d+)", requested)
@@ -88,6 +96,18 @@ def _resolve_http_version():
 HTTP_VERSION = _resolve_http_version()
 
 
+def _filter_browser_headers(kwargs):
+    # Auth also builds raw headers outside HeaderBuilder. Preserve duplicate
+    # Cookie fields and caller-owned dictionaries while removing Chromium hints.
+    if not str(kwargs.get("impersonate", "")).startswith("firefox"):
+        return
+    headers = kwargs.get("headers")
+    if headers is not None:
+        items = headers.items() if hasattr(headers, "items") else headers
+        kwargs["headers"] = [(name, value) for name, value in items
+                             if not name.lower().startswith("sec-ch-ua")]
+
+
 def split_h2_cookie_fields(cookie_header):
     """按 Chromium HTTP/2 wire 形式拆成独立 ``cookie`` 字段值。"""
     return [part.strip() for part in str(cookie_header or "").split(";")
@@ -108,6 +128,7 @@ def request(method, url, **kwargs):
     kwargs.setdefault("default_headers", False)
     kwargs.setdefault("http_version", HTTP_VERSION)
     kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+    _filter_browser_headers(kwargs)
     return _cffi.request(method, url, **kwargs)
 
 
@@ -137,6 +158,7 @@ class Session:
         kwargs.setdefault("default_headers", False)
         kwargs.setdefault("http_version", HTTP_VERSION)
         kwargs.setdefault("timeout", DEFAULT_TIMEOUT)
+        _filter_browser_headers(kwargs)
         with self._lock:
             return self._session.request(method, url, **kwargs)
 
