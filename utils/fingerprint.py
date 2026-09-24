@@ -62,20 +62,25 @@ def get_profile():
     """进程级指纹档案（UA/几何/硬件统一，进程内稳定）。"""
     global _profile
     if _profile is None:
-        ua = _env("ua", _DEFAULTS["ua"])
-        major = _env("browser_version", _DEFAULTS["browser_version"]).split(".")[0]
+        from utils.http_client import IMPERSONATE
+        firefox = IMPERSONATE.startswith("firefox")
+        version = IMPERSONATE[7:] + ".0" if firefox else _DEFAULTS["browser_version"]
+        default_ua = (f"Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:{version}) "
+                      f"Gecko/20100101 Firefox/{version}") if firefox else _DEFAULTS["ua"]
+        ua = _env("ua", default_ua)
+        major = _env("browser_version", version).split(".")[0]
         _profile = {
             "ua": ua,
             # Chrome 151 truth from the live login capture / user's curl.
             # Keep the brand order and GREASE token exactly as emitted by the
             # browser; this header is present on both passport and mssdk XHRs.
             "sec_ch_ua": (f'"Not=A?Brand";v="99", "Google Chrome";v="{major}", '
-                          f'"Chromium";v="{major}"'),
-            "sec_ch_ua_platform": '"Windows"',
-            "browser_name": "Chrome",
-            "browser_version": _env("browser_version", _DEFAULTS["browser_version"]),
-            "engine_name": "Blink",
-            "engine_version": _env("engine_version", _DEFAULTS["engine_version"]),
+                          f'"Chromium";v="{major}"') if not firefox else "",
+            "sec_ch_ua_platform": '"Windows"' if not firefox else "",
+            "browser_name": "Firefox" if firefox else "Chrome",
+            "browser_version": _env("browser_version", version),
+            "engine_name": "Gecko" if firefox else "Blink",
+            "engine_version": _env("engine_version", version if firefox else _DEFAULTS["engine_version"]),
             "os_name": "Windows",
             "os_version": "10",
             "platform": "Win32",
@@ -104,6 +109,8 @@ def get_profile():
         avail_h = _int_env("avail_height", h - 48)
         _profile["geo"] = (inner_w, inner_h, outer_w, outer_h,
                             avail_w, avail_h, w, h)
+        for key in ("sec_ch_ua", "sec_ch_ua_platform", "platform", "os_name", "os_version"):
+            _profile[key] = _env(key, _profile[key])
     return _profile
 
 
