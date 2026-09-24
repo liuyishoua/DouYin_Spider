@@ -43,7 +43,7 @@ class ProtoBuilder:
         request.headers['user_agent'] = HeaderBuilder.ua
         request.headers['cookie_enabled'] = 'true'
         request.headers['browser_language'] = 'zh-CN'
-        request.headers['browser_platform'] = 'Win32'
+        request.headers['browser_platform'] = get_profile()["platform"]
         # IM's protobuf client uses navigator.appName/appVersion here, unlike
         # the public REST query helpers which use the Chrome brand/version.
         # Current Chrome wire capture: browser_name="Mozilla" and
