@@ -119,10 +119,14 @@ class Header:
         return self
 
     def get(self):
+        from utils.fingerprint import get_profile
+        if get_profile()["browser_name"] == "Firefox":
+            return {key: value for key, value in self.headers.items()
+                    if not key.lower().startswith('sec-ch-ua')}
         return self.headers
 
     def __call__(self):
-        return self.headers
+        return self.get()
 
 
 class HeaderBuilder:
