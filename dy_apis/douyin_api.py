@@ -1866,25 +1866,48 @@ class DouyinAPI:
         :param to_user_id: 私信对话接收者ID.
         :return: 私信对话ID.
         """
-        url = "https://imapi.douyin.com/v2/conversation/create"
-        requestProto = ProtoBuilder.build_create_conversation_request(auth, to_user_id, auth.get_uid())
-        headers = HeaderBuilder().build(HeaderType.PROTOBUF)
-        headers.set_header('referer', 'https://www.douyin.com/')
-
-        resp = requests.post(
-            url,
-            headers=headers.get(),
-            cookies=auth.cookie,
-            data=requestProto.SerializeToString(),
-            verify=False
-        )
-        responseProto = ResponseProto.Response()
-        responseProto.ParseFromString(resp.content)
-        resp_json = protobuf_to_dict(responseProto)
-        conversation = resp_json['body']['create_conversation_v2_body']['conversation_info_list'][0]
-        conversation_id = conversation['conversation_id']
-        conversation_short_id, ticket = int(conversation['conversation_short_id']), conversation['ticket']
-        return conversation_id, conversation_short_id, ticket
+        from utils.send_diagnostics import ConversationError, conversation_response_diagnostic, exception_diagnostic
+        diagnostic = {}
+        operation = 'identity_lookup'
+        try:
+            my_uid = auth.get_uid()
+            operation = 'request_build'
+            url = "https://imapi.douyin.com/v2/conversation/create"
+            requestProto = ProtoBuilder.build_create_conversation_request(auth, to_user_id, my_uid)
+            headers = HeaderBuilder().build(HeaderType.PROTOBUF)
+            headers.set_header('referer', 'https://www.douyin.com/')
+            payload = requestProto.SerializeToString()
+            operation = 'request'
+            resp = requests.post(url, headers=headers.get(), cookies=auth.cookie,
+                                 data=payload, verify=False)
+            operation = 'response_decode'
+            diagnostic = conversation_response_diagnostic(resp)
+            responseProto = ResponseProto.Response()
+            responseProto.ParseFromString(resp.content)
+            diagnostic.update(message_ok=responseProto.message == 'OK', has_error_desc=bool(responseProto.error_desc))
+            message_name = responseProto.message.strip().upper().replace(' ', '_')
+            if message_name in ('OK', 'INVALID_TOKEN', 'EXPIRED_TOKEN', 'TOKEN_EXPIRED',
+                                'INVALID_TICKET', 'INVALID_REQUEST', 'USER_FORBIDDEN', 'FREQUENCY_LIMIT'):
+                diagnostic['platform_message'] = message_name
+            else:
+                # Only fixed error categories survive; never retain a token or other suffix.
+                for label, patterns in (
+                        ('TOKEN_MISSING', ('TOKEN_IS_EMPTY', 'TOKEN_EMPTY', 'EMPTY_TOKEN', 'MISSING_TOKEN', 'TOKEN_IS_MISSING', 'TOKEN_NOT_FOUND')),
+                        ('INVALID_TOKEN', ('INVALID_TOKEN', 'TOKEN_IS_INVALID', 'TOKEN_INVALID')),
+                        ('EXPIRED_TOKEN', ('EXPIRED_TOKEN', 'TOKEN_EXPIRED', 'TOKEN_IS_EXPIRED')),
+                        ('TOKEN_CHECK_FAILED', ('TOKEN_CHECK_FAILED', 'CHECK_TOKEN_FAILED', 'TOKEN_VERIFY_FAILED'))):
+                    if any(message_name == p or message_name.startswith(p + ':') or message_name.startswith(p + '_') for p in patterns):
+                        diagnostic['platform_message'] = label
+                        break
+            operation = 'response_extract'
+            resp_json = protobuf_to_dict(responseProto)
+            conversation = resp_json['body']['create_conversation_v2_body']['conversation_info_list'][0]
+            conversation_id = conversation['conversation_id']
+            conversation_short_id, ticket = int(conversation['conversation_short_id']), conversation['ticket']
+            return conversation_id, conversation_short_id, ticket
+        except Exception as exc:
+            raise ConversationError({**diagnostic, **exception_diagnostic(exc),
+                                     'operation_stage': operation}) from None
 
     @staticmethod
     def get_conversation_list(auth, to_user_id: int, conversation_short_id: int, **kwargs) -> dict:
@@ -1928,6 +1951,13 @@ class DouyinAPI:
             }
         except Exception:
             return None
+
+    @staticmethod
+    def get_conversation_messages(auth, conversation_id, conversation_short_id, *, direction='latest', cursor=0, count=50):
+        """分页读取既有单聊历史；不创建会话、不发消息、不标已读。"""
+        from dy_apis.douyin_im_history import get_conversation_messages
+        return get_conversation_messages(auth, conversation_id, conversation_short_id,
+                                         direction=direction, cursor=cursor, count=count)
 
     @staticmethod
     def get_identity_security_token(auth, force=False, **kwargs):
@@ -2060,22 +2090,20 @@ class DouyinAPI:
             raise
         resp_json = protobuf_to_dict(responseProto)
         success = resp_json.get('message') == 'OK'
-        if success:
-            logger.info(f'私信发送成功 conversation_id={conversation_id}')
-        else:
-            logger.error(f'私信发送失败 {resp_json}')
         if kwargs.get('return_details'):
             from utils.send_diagnostics import response_diagnostic
             # Web callers must retain evidence that this schema cannot decode.
             known = ResponseProto.Response()
             known.CopyFrom(responseProto)
             known.DiscardUnknownFields()
+            diagnostic = response_diagnostic(responseProto, http_status=getattr(resp, 'status_code', None))
+            logger.info('私信响应 reason={} business_code={}', diagnostic['reason'], diagnostic.get('business_code'))
             return {
                 'response': resp_json,
                 'has_unknown_fields': known.SerializeToString() != responseProto.SerializeToString(),
-                'diagnostic': {**response_diagnostic(responseProto),
-                               'http_status': getattr(resp, 'status_code', None)},
+                'diagnostic': diagnostic,
             }
+        logger.info('私信响应 outer_message_ok={}', success)
         return success
 
     @staticmethod
@@ -2107,7 +2135,11 @@ class DouyinAPI:
             key: kwargs.pop(key) for key in ("user_id", "gif", "proxies")
             if key in kwargs
         }
-        payload = DouyinIMMedia.upload_image(auth, image, **upload_kwargs)
+        try:
+            payload = DouyinIMMedia.upload_image(auth, image, **upload_kwargs)
+        except Exception as exc:
+            from utils.send_diagnostics import ImageUploadError, exception_diagnostic
+            raise ImageUploadError(exception_diagnostic(exc)) from None
         return DouyinAPI._send_message_raw(
             auth, conversation_id, conversation_short_id, ticket, DouyinAPI.IM_STORY_PICTURE, payload,
             **kwargs,
